@@ -5,6 +5,7 @@
 #include <mod/amlmod.h>
 #include <mod/logger.h>
 #include <mod/config.h>
+#include <stdarg.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,7 +16,7 @@
 #include "config.h"
 #include "weapons.h"
 
-MYMODCFG(net.user.gta6hud, GTA6 HUD, 0.2.0, user)
+MYMODCFG(net.user.gta6hud, GTA6 HUD, 0.2.1, user)
 
 // ---- tipe game (layout sama dengan game; ukuran/HFA dicocokkan) -------------------------
 struct CRect { float x1, y1, x2, y2; };            // (left, bottom, right, top) di game; dipakai sebagai x1,y1,x2,y2 layar
@@ -34,9 +35,15 @@ static const int OFF_WEAPON_CLIP      = 8;      // DUGAAN (layout PC) -> divalid
 static const int OFF_WEAPON_TOTAL     = 12;     // DUGAAN (layout PC) -> divalidasi
 
 static HudConfig g_cfg;
+static std::string g_dir;          // .../files/GTA6HUD/
+static void Log(const char* fmt, ...) {
+    char buf[512]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    logger->Info("GTA6HUD: %s", buf);
+    if (!g_dir.empty()) if (FILE* f = fopen((g_dir + "GTA6HUD.log").c_str(), "a")) { fprintf(f, "%s\n", buf); fclose(f); }
+}
+static const char* g_why = "belum dicek";
 static bool g_enabled = true;      // false bila crash terdeteksi pada peluncuran sebelumnya
 static int  g_frames = 0;
-static std::string g_dir;          // .../files/GTA6HUD/
 
 // ---- fungsi game (diambil lewat dlsym) --------------------------------------------------
 static void* g_hGTASA = nullptr;
@@ -59,14 +66,14 @@ static void  (*CFont_RenderFontBuffer)() = nullptr;
 
 template <typename T> static bool Sym(const char* n, T& out) {
     out = (T)dlsym(g_hGTASA, n);
-    if (!out) logger->Error("GTA6HUD: simbol hilang: %s", n);
+    if (!out) Log("SIMBOL HILANG: %s", n);
     return out != nullptr;
 }
 template <typename Fn> static bool HookSym(const char* sym, Fn rep, Fn* orig) {
     void* a = dlsym(g_hGTASA, sym);
-    if (!a) { logger->Error("GTA6HUD: hook gagal, simbol hilang: %s", sym); return false; }
+    if (!a) { Log("HOOK GAGAL, simbol hilang: %s", sym); return false; }
     aml->Hook(a, (void*)rep, (void**)orig);
-    logger->Info("GTA6HUD: hook OK: %s", sym);
+    Log("hook OK: %s", sym);
     return true;
 }
 
@@ -78,9 +85,9 @@ static bool Sane(float v, float lo, float hi) { return v == v && v >= lo && v <=
 struct PlayerView { float health, armour; bool armourOK; int weapon; int clip, total; bool weaponOK, ammoOK; };
 static bool ReadPlayer(PlayerView& pv) {
     void* ped = FindPlayerPed ? FindPlayerPed(0) : nullptr;
-    if (!PtrOK(ped)) return false;
+    if (!PtrOK(ped)) { g_why = "ped null/tidak valid"; return false; }
     pv.health = Rd<float>(ped, OFF_PED_HEALTH);
-    if (!Sane(pv.health, 0.0f, 2000.0f)) return false;
+    if (!Sane(pv.health, 0.0f, 2000.0f)) { g_why = "nilai health tidak wajar"; return false; }
     pv.armour = Rd<float>(ped, OFF_PED_ARMOUR);
     pv.armourOK = Sane(pv.armour, 0.0f, 300.0f);
     int slot = Rd<int8_t>(ped, OFF_PED_ACTIVE_SLOT);
@@ -94,6 +101,7 @@ static bool ReadPlayer(PlayerView& pv) {
             pv.ammoOK = pv.clip >= 0 && pv.clip < 100000 && pv.total >= 0 && pv.total < 1000000;
         }
     }
+    g_why = "ok";
     return true;
 }
 
@@ -110,7 +118,7 @@ static void UpdateScreen() {
         }
     }
     if (g_W <= 0) { int w = 0, h = 0; aml->GetDisplaySize(&w, &h); if (w > h && h > 0) { g_W = (float)w; g_H = (float)h; } }
-    logger->Info("GTA6HUD: layar %.0fx%.0f", g_W, g_H);
+    Log("layar %.0fx%.0f", g_W, g_H);
 }
 
 // ---- texture ikon dari TXD game ------------------------------------------------------------
@@ -128,7 +136,7 @@ static CSprite2d* GetIcon(int id) {
                 CSprite2d_SetTexture(&g_icons[id], (char*)name);
                 CTxdStore_PopCurrentTxd();
             }
-            logger->Info("GTA6HUD: ikon %s %s", name, g_icons[id].tex ? "ditemukan" : "TIDAK ada di HUD.TXD");
+            Log("ikon %s %s", name, g_icons[id].tex ? "ditemukan" : "TIDAK ada di HUD.TXD");
         }
     }
     return g_icons[id].tex ? &g_icons[id] : nullptr;
@@ -144,7 +152,8 @@ static void (*Widget_RenderHealthBar_o)(void*, int, float);
 static void (*Widget_RenderBreathBar_o)(void*, int, float);
 static void (*Widget_DrawWeaponIcon_o)(void*, void*, CRect, float);
 
-static bool g_customBars = false;   // true bila pembacaan health kemarin masuk akal -> bar asli diganti
+static bool g_customBars = false;
+#define FIRST(n) do { static bool seen = false; if (!seen) { seen = true; Log("hook dipanggil pertama kali: %s", n); } } while (0)   // true bila pembacaan health kemarin masuk akal -> bar asli diganti
 
 static void DrawBar(float x, float y, float w, float h, float frac, CRGBA fill) {
     if (frac < 0) frac = 0; if (frac > 1) frac = 1;
@@ -155,11 +164,27 @@ static void DrawBar(float x, float y, float w, float h, float frac, CRGBA fill) 
 
 static void CHud_Draw_h() {
     CHud_Draw_o();
+    FIRST("CHud::Draw");
     if (!g_enabled) return;
     g_frames++;
-    if (g_frames == 300) { unlink((g_dir + ".initlock").c_str()); logger->Info("GTA6HUD: 300 frame aman, initlock dihapus"); }
+    if (g_frames == 300) { unlink((g_dir + ".initlock").c_str()); Log("300 frame aman, initlock dihapus"); }
 
     UpdateScreen();
+    if (g_frames == 1 || g_frames == 120 || g_frames == 600) {
+        PlayerView t; bool r = g_W > 0 && ReadPlayer(t);
+        Log("frame %d layar=%.0fx%.0f baca_player=%d (%s) hp=%.1f armor=%.1f senjata=%d clip=%d total=%d statusBars=%d",
+            g_frames, g_W, g_H, r, g_why, r ? t.health : -1.f, r ? t.armour : -1.f, r ? t.weapon : -1, r ? t.clip : -1, r ? t.total : -1, (int)g_cfg.statusBars);
+    }
+    if (g_frames < 900 && g_W > 0 && CSprite2d_DrawRect) {   // penanda debug: kotak merah di kiri atas ~15 detik
+        float k = g_H / 1080.0f;
+        CSprite2d_DrawRect({ 20 * k, 20 * k, 140 * k, 60 * k }, { 255, 0, 0, 220 });
+        if (CFont_PrintString) {
+            uint16_t w2[] = { 'G','T','A','6','H','U','D',' ','0','.','2', 0 };
+            CFont_SetFontStyle(1); CFont_SetProportional(1); CFont_SetBackground(0, 0); CFont_SetJustify(0);
+            CFont_SetScale(0.6f * k); CFont_SetColor({ 255, 255, 255, 255 });
+            CFont_PrintString(26 * k, 26 * k, w2); CFont_RenderFontBuffer();
+        }
+    }
     PlayerView pv;
     if (g_W <= 0 || !CSprite2d_DrawRect || !ReadPlayer(pv)) { g_customBars = false; return; }
     g_customBars = g_cfg.statusBars;
@@ -184,11 +209,12 @@ static void CHud_Draw_h() {
     }
 }
 
-static void CHud_DrawRadar_h()     { if (g_cfg.minimapShow) CHud_DrawRadar_o(); }
+static void CHud_DrawRadar_h()     { FIRST("CHud::DrawRadar"); if (g_cfg.minimapShow) CHud_DrawRadar_o(); }
 static void CHud_DrawHelpText_h()  { if (g_cfg.helpBox)    CHud_DrawHelpText_o(); }
 static void CHud_DrawSubtitles_h() { if (g_cfg.subtitles)  CHud_DrawSubtitles_o(); }
 static void Widget_DrawWanted_h(void* self) { if (g_cfg.wantedStars) Widget_DrawWanted_o(self); }
 static void Widget_RenderHealthBar_h(void* self, int a, float b) {
+    FIRST("RenderHealthBar");
     if (!g_cfg.statusBars) return;
     if (g_enabled && g_customBars) return;          // bar kustom menggantikan
     Widget_RenderHealthBar_o(self, a, b);
@@ -196,6 +222,7 @@ static void Widget_RenderHealthBar_h(void* self, int a, float b) {
 static void Widget_RenderBreathBar_h(void* self, int a, float b) { if (g_cfg.oxygenBar) Widget_RenderBreathBar_o(self, a, b); }
 
 static void Widget_DrawWeaponIcon_h(void* self, void* ped, CRect r, float f) {
+    FIRST("DrawWeaponIcon");
     if (!g_cfg.weaponIcon) return;
     if (g_enabled && CSprite2d_Draw && PtrOK(ped)) {
         PlayerView pv;
@@ -214,20 +241,21 @@ static void LoadConfigAndPaths() {
     g_dir = base + "GTA6HUD/";
     mkdir(g_dir.c_str(), 0777);
     const char* names[] = { "GTA6HUD/GTA6HUD.ini", "GTA6HUD.ini", "mods/GTA6HUD.ini" };
-    for (auto n : names) if (LoadHudConfig((base + n).c_str(), g_cfg)) { logger->Info("GTA6HUD: config: %s%s", base.c_str(), n); return; }
-    logger->Info("GTA6HUD: GTA6HUD.ini tidak ada, pakai default");
+    for (auto n : names) if (LoadHudConfig((base + n).c_str(), g_cfg)) { Log("config: %s%s", base.c_str(), n); return; }
+    Log("GTA6HUD.ini tidak ada, pakai default");
 }
 
 extern "C" void OnModLoad() {
     logger->SetTag("GTA6HUD");
     g_hGTASA = dlopen("libGTASA.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!g_hGTASA) { logger->Error("GTA6HUD: libGTASA.so tidak ditemukan"); return; }
+    if (!g_hGTASA) { Log("libGTASA.so tidak ditemukan"); return; }
     LoadConfigAndPaths();
+    Log("=== GTA6HUD 0.2.1 OnModLoad, dir=%s ===", g_dir.c_str());
 
     std::string lock = g_dir + ".initlock";
     if (access(lock.c_str(), F_OK) == 0) {
         g_enabled = false;
-        logger->Error("GTA6HUD: .initlock ada (game crash sebelum 300 frame?). Mode aman: hanya toggle HUD. Hapus file itu untuk mencoba lagi.");
+        Log(".initlock ada (game crash sebelum 300 frame?). Mode aman: hanya toggle HUD. Hapus file itu untuk mencoba lagi.");
     } else if (FILE* f = fopen(lock.c_str(), "w")) { fputs("1", f); fclose(f); }
 
     bool ok = true;
@@ -243,7 +271,7 @@ extern "C" void OnModLoad() {
     Sym("_ZN5CFont8SetColorE5CRGBA", CFont_SetColor);     Sym("_ZN5CFont15SetProportionalEh", CFont_SetProportional);
     Sym("_ZN5CFont13SetBackgroundEhh", CFont_SetBackground); Sym("_ZN5CFont10SetJustifyEh", CFont_SetJustify);
     Sym("_ZN5CFont11PrintStringEffPt", CFont_PrintString);   Sym("_ZN5CFont16RenderFontBufferEv", CFont_RenderFontBuffer);
-    if (!ok) { g_enabled = false; logger->Error("GTA6HUD: simbol penting hilang -> mode aman"); }
+    if (!ok) { g_enabled = false; Log("simbol penting hilang -> mode aman"); }
 
     HookSym("_ZN4CHud4DrawEv",            CHud_Draw_h,           &CHud_Draw_o);
     HookSym("_ZN4CHud9DrawRadarEv",       CHud_DrawRadar_h,      &CHud_DrawRadar_o);

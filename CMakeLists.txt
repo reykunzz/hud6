@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(GTA6HUD CXX)
 set(CMAKE_CXX_STANDARD 17)
-# AML_DIR = hasil clone https://github.com/RusJJ/AndroidModLoader (berisi folder mod/)
 set(AML_DIR "${CMAKE_SOURCE_DIR}/AndroidModLoader" CACHE PATH "Lokasi AndroidModLoader")
 file(GLOB AML_SRC "${AML_DIR}/mod/*.cpp")
 message(STATUS "Sumber AML: ${AML_SRC}")
