@@ -4,6 +4,7 @@
 // - Pengaman crash: file .initlock (lihat README).
 #include <mod/amlmod.h>
 #include <mod/logger.h>
+#include <mod/config.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
